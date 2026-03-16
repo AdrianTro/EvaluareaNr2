@@ -1,0 +1,754 @@
+<!DOCTYPE html>
+<html lang="ro">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Fishing Master</title>
+    <link rel="stylesheet" href="style.css" />
+</head>
+
+<body>
+    <div class="page-bg"></div>
+
+    <div class="container">
+        <header class="top-panel">
+            <h1>🎣 Fishing Master</h1>
+            <p id="statusText" class="status-text">Apasă <b>ARUNCĂ</b> ca să începi pescuitul.</p>
+
+            <div class="hud">
+                <div class="hud-box">Pești prinși: <span id="fishCount">0</span></div>
+                <div class="hud-box">Scor: <span id="scoreCount">0</span></div>
+            </div>
+
+            <div class="controls">
+                <button id="castBtn" class="action-btn main-btn">ARUNCĂ</button>
+                <button id="reelBtn" class="action-btn danger-btn hidden">SCOATE</button>
+                <button id="collectionBtn" class="action-btn secondary-btn">PEȘTE</button>
+            </div>
+        </header>
+
+        <main class="game-wrapper">
+            <canvas id="gameCanvas" width="1000" height="560"></canvas>
+        </main>
+
+        <p class="help-text">
+            În minijoc: ține apăsat <b>SPACE</b> sau <b>click pe canvas</b> ca să ridici bara verde.
+        </p>
+    </div>
+
+    <div id="collectionPanel" class="collection-panel hidden">
+        <div class="collection-card">
+            <div class="collection-head">
+                <h2>🐟 Pești prinși</h2>
+                <button id="closeCollection" class="close-btn">✕</button>
+            </div>
+            <div id="collectionGrid" class="collection-grid"></div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById("gameCanvas");
+        const ctx = canvas.getContext("2d");
+
+        const statusText = document.getElementById("statusText");
+        const castBtn = document.getElementById("castBtn");
+        const reelBtn = document.getElementById("reelBtn");
+        const collectionBtn = document.getElementById("collectionBtn");
+        const closeCollection = document.getElementById("closeCollection");
+        const collectionPanel = document.getElementById("collectionPanel");
+        const collectionGrid = document.getElementById("collectionGrid");
+        const fishCount = document.getElementById("fishCount");
+        const scoreCount = document.getElementById("scoreCount");
+
+        const W = canvas.width;
+        const H = canvas.height;
+
+        const fishTypes = [
+            { id: 1, name: "Crap", rarity: "Comun", weight: 42, difficulty: 0.95, points: 10, image: "img/img_1.png", color: "#b4d455" },
+            { id: 2, name: "Știucă", rarity: "Rar", weight: 26, difficulty: 1.08, points: 18, image: "img/img_2.png", color: "#7ad97a" },
+            { id: 3, name: "Somn", rarity: "Rar", weight: 16, difficulty: 1.18, points: 24, image: "img/img_3.png", color: "#6fc8ff" },
+            { id: 4, name: "Păstrăv de Aur", rarity: "Epic", weight: 10, difficulty: 1.32, points: 36, image: "img/img_4.png", color: "#ffd84d" },
+            { id: 5, name: "Pește Legendar", rarity: "Legendary", weight: 6, difficulty: 1.48, points: 60, image: "img/img_5.png", color: "#ff8cf0" }
+        ];
+
+        const game = {
+            phase: "idle",
+            status: "Apasă ARUNCĂ ca să începi pescuitul.",
+            caught: [],
+            score: 0,
+            rodBob: 0,
+            lineWave: 0,
+            inputHold: false,
+            waitTimer: null,
+            biteWindowTimer: null,
+            idleTimer: null,
+            currentFish: null,
+            minigame: null,
+            particles: [],
+            bubbles: [],
+            ripples: [],
+            flash: 0
+        };
+
+        function setStatus(text) {
+            game.status = text;
+            statusText.innerHTML = text;
+        }
+
+        function updateHud() {
+            fishCount.textContent = game.caught.length;
+            scoreCount.textContent = game.score;
+        }
+
+        function clearTimers() {
+            clearTimeout(game.waitTimer);
+            clearTimeout(game.biteWindowTimer);
+            clearTimeout(game.idleTimer);
+            game.waitTimer = null;
+            game.biteWindowTimer = null;
+            game.idleTimer = null;
+        }
+
+        function resetButtons() {
+            castBtn.disabled = false;
+            castBtn.textContent = "ARUNCĂ";
+            reelBtn.classList.add("hidden");
+        }
+
+        function pickRandomFish() {
+            const totalWeight = fishTypes.reduce((sum, fish) => sum + fish.weight, 0);
+            let r = Math.random() * totalWeight;
+            for (const fish of fishTypes) {
+                r -= fish.weight;
+                if (r <= 0) return fish;
+            }
+            return fishTypes[0];
+        }
+
+        function addRipple(x, y, size = 10) {
+            game.ripples.push({
+                x,
+                y,
+                r: size,
+                alpha: 0.55
+            });
+        }
+
+        function addBubble() {
+            const bx = W / 2 + (Math.random() * 130 - 65);
+            const by = H * 0.72 + Math.random() * 80;
+            game.bubbles.push({
+                x: bx,
+                y: by,
+                r: 2 + Math.random() * 5,
+                speed: 0.4 + Math.random() * 1
+            });
+        }
+
+        function addParticles(x, y, color) {
+            for (let i = 0; i < 18; i++) {
+                game.particles.push({
+                    x,
+                    y,
+                    vx: (Math.random() - 0.5) * 5,
+                    vy: (Math.random() - 0.5) * 5,
+                    size: 2 + Math.random() * 4,
+                    alpha: 1,
+                    color
+                });
+            }
+        }
+
+        function returnToIdle(delay = 0) {
+            clearTimeout(game.idleTimer);
+            game.idleTimer = setTimeout(() => {
+                game.phase = "idle";
+                game.currentFish = null;
+                game.minigame = null;
+                resetButtons();
+            }, delay);
+        }
+
+        function startFishing() {
+            if (game.phase !== "idle") return;
+
+            clearTimers();
+            game.phase = "waiting";
+            game.currentFish = null;
+            game.minigame = null;
+            castBtn.disabled = true;
+            castBtn.textContent = "AȘTEAPTĂ...";
+            reelBtn.classList.add("hidden");
+
+            setStatus("Undița este în apă... aștepți să se prindă ceva.");
+
+            game.waitTimer = setTimeout(() => {
+                if (game.phase !== "waiting") return;
+
+                const biteChance = Math.random() < 0.78;
+                if (biteChance) {
+                    game.phase = "bite";
+                    setStatus(" Se prinde ceva! Apasă <b>SCOATE</b>!");
+                    reelBtn.classList.remove("hidden");
+
+                    game.biteWindowTimer = setTimeout(() => {
+                        if (game.phase === "bite") {
+                            reelBtn.classList.add("hidden");
+                            setStatus(" Prea târziu... peștele a scăpat.");
+                            returnToIdle(1400);
+                        }
+                    }, 2500);
+                } else {
+                    setStatus("😅 Nu se prinde nimic. Încearcă din nou.");
+                    returnToIdle(1400);
+                }
+            }, 1800 + Math.random() * 2200);
+        }
+
+        function startMinigame() {
+            if (game.phase !== "bite") return;
+
+            clearTimeout(game.biteWindowTimer);
+            game.phase = "minigame";
+            reelBtn.classList.add("hidden");
+
+            const fish = pickRandomFish();
+            game.currentFish = fish;
+
+            game.minigame = {
+                barX: W / 2 - 34,
+                barY: 110,
+                barW: 68,
+                barH: 340,
+                playerY: 260,
+                playerH: 110,
+                playerV: 0,
+                fishY: 260,
+                fishV: 0,
+                fishTargetY: 260,
+                targetTimer: 0,
+                progress: 55,
+                tension: 0
+            };
+
+            setStatus("Ține peștele în zona verde și umple bara!");
+        }
+
+        function finishCatch(success) {
+            if (!game.currentFish) {
+                game.phase = "idle";
+                resetButtons();
+                return;
+            }
+
+            const fish = game.currentFish;
+            const centerX = W / 2;
+            const centerY = H / 2;
+
+            if (success) {
+                game.caught.push(fish);
+                game.score += fish.points;
+                updateHud();
+                updateCollection();
+
+                setStatus(`Ai prins: <b>${fish.name}</b> (${fish.rarity})`);
+                addParticles(centerX, centerY, fish.color);
+                game.flash = 1;
+            } else {
+                setStatus(`${fish.name} a scăpat...`);
+                addParticles(centerX, centerY, "#ffffff");
+            }
+
+            game.phase = "idle";
+            game.currentFish = null;
+            game.minigame = null;
+            resetButtons();
+        }
+
+        function updateCollection() {
+            collectionGrid.innerHTML = "";
+
+            if (game.caught.length === 0) {
+                collectionGrid.innerHTML = `
+          <div class="empty-collection">
+            Nu ai prins niciun pește încă.
+          </div>
+        `;
+                return;
+            }
+
+            const grouped = {};
+            for (const fish of game.caught) {
+                if (!grouped[fish.id]) {
+                    grouped[fish.id] = { ...fish, count: 0 };
+                }
+                grouped[fish.id].count++;
+            }
+
+            Object.values(grouped).forEach(fish => {
+                const item = document.createElement("div");
+                item.className = "fish-card";
+                item.innerHTML = `
+          <div class="fish-img-wrap">
+            <img src="${fish.image}" alt="${fish.name}"
+                 onerror="this.style.display='none'; this.parentNode.innerHTML += '<div class=img-fallback>Fără imagine</div>';">
+            <span class="fish-count">x${fish.count}</span>
+          </div>
+          <div class="fish-info">
+            <h3>${fish.name}</h3>
+            <p>${fish.rarity}</p>
+            <small>${fish.points} puncte</small>
+          </div>
+        `;
+                collectionGrid.appendChild(item);
+            });
+        }
+
+        function updateMinigame(dt) {
+            const mg = game.minigame;
+            if (!mg) return;
+
+            const difficulty = game.currentFish ? game.currentFish.difficulty : 1;
+
+            if (game.inputHold) {
+                mg.playerV -= 0.48 * dt;
+            } else {
+                mg.playerV += 0.34 * dt;
+            }
+
+            mg.playerV *= 0.93;
+            mg.playerY += mg.playerV * 4.2;
+            const halfH = mg.playerH / 2;
+
+            if (mg.playerY - halfH < mg.barY) {
+                mg.playerY = mg.barY + halfH;
+                mg.playerV = 0;
+            }
+            if (mg.playerY + halfH > mg.barY + mg.barH) {
+                mg.playerY = mg.barY + mg.barH - halfH;
+                mg.playerV = 0;
+            }
+
+            mg.targetTimer -= dt;
+            if (mg.targetTimer <= 0) {
+                mg.targetTimer = (30 + Math.random() * 35) / difficulty;
+                mg.fishTargetY = mg.barY + 35 + Math.random() * (mg.barH - 70);
+            }
+
+            mg.fishV += (mg.fishTargetY - mg.fishY) * 0.010 * difficulty;
+            mg.fishV *= 0.90;
+            mg.fishY += mg.fishV;
+
+            if (mg.fishY < mg.barY + 18) mg.fishY = mg.barY + 18;
+            if (mg.fishY > mg.barY + mg.barH - 18) mg.fishY = mg.barY + mg.barH - 18;
+
+            const playerTop = mg.playerY - mg.playerH / 2;
+            const playerBottom = mg.playerY + mg.playerH / 2;
+            const fishInside = mg.fishY >= playerTop && mg.fishY <= playerBottom;
+
+            if (fishInside) {
+                mg.progress += 0.80 * dt;
+            } else {
+                mg.progress -= 0.38 * dt * difficulty;
+            }
+
+            mg.progress = Math.max(0, Math.min(100, mg.progress));
+
+            if (Math.random() < 0.08) {
+                addRipple(W / 2 + (Math.random() * 30 - 15), H * 0.73 + Math.random() * 18, 6 + Math.random() * 10);
+            }
+
+            if (mg.progress >= 100) {
+                finishCatch(true);
+            } else if (mg.progress <= 0) {
+                finishCatch(false);
+            }
+        }
+
+        function updateWorld(dt) {
+            game.rodBob += 0.03 * dt;
+            game.lineWave += 0.04 * dt;
+
+            game.ripples.forEach(r => {
+                r.r += 1.2 * dt;
+                r.alpha -= 0.01 * dt;
+            });
+            game.ripples = game.ripples.filter(r => r.alpha > 0);
+
+            game.bubbles.forEach(b => {
+                b.y -= b.speed * 1.8 * dt;
+                b.x += Math.sin(b.y * 0.06) * 0.2;
+            });
+            game.bubbles = game.bubbles.filter(b => b.y > H * 0.52);
+
+            game.particles.forEach(p => {
+                p.x += p.vx * dt;
+                p.y += p.vy * dt;
+                p.alpha -= 0.03 * dt;
+                p.size *= 0.985;
+            });
+            game.particles = game.particles.filter(p => p.alpha > 0.02 && p.size > 0.3);
+
+            if (game.flash > 0) {
+                game.flash -= 0.03 * dt;
+                if (game.flash < 0) game.flash = 0;
+            }
+
+            if (game.phase === "minigame") {
+                updateMinigame(dt);
+            }
+
+            if (game.phase === "waiting" || game.phase === "bite") {
+                if (Math.random() < 0.09) {
+                    addRipple(W / 2 + (Math.random() * 16 - 8), H * 0.72 + Math.random() * 10, 8 + Math.random() * 8);
+                }
+            }
+        }
+
+        function drawBackground() {
+            const sky = ctx.createLinearGradient(0, 0, 0, H);
+            sky.addColorStop(0, "#72d0ff");
+            sky.addColorStop(0.5, "#b4f0ff");
+            sky.addColorStop(0.5001, "#59b1df");
+            sky.addColorStop(1, "#0b5f8b");
+            ctx.fillStyle = sky;
+            ctx.fillRect(0, 0, W, H);
+
+            ctx.fillStyle = "rgba(40,120,60,0.85)";
+            ctx.beginPath();
+            ctx.moveTo(0, H * 0.47);
+            for (let x = 0; x <= W; x += 40) {
+                const y = H * 0.44 + Math.sin(x * 0.03) * 12 + Math.cos((x + performance.now() * 0.02) * 0.015) * 10;
+                ctx.lineTo(x, y);
+            }
+            ctx.lineTo(W, 0);
+            ctx.lineTo(0, 0);
+            ctx.closePath();
+            ctx.fill();
+
+            const waterY = H * 0.52;
+            const water = ctx.createLinearGradient(0, waterY, 0, H);
+            water.addColorStop(0, "rgba(70,170,220,0.95)");
+            water.addColorStop(1, "rgba(10,70,110,0.95)");
+            ctx.fillStyle = water;
+            ctx.fillRect(0, waterY, W, H - waterY);
+
+            ctx.strokeStyle = "rgba(255,255,255,0.17)";
+            ctx.lineWidth = 2;
+            for (let i = 0; i < 5; i++) {
+                const waveY = waterY + 20 + i * 28;
+                ctx.beginPath();
+                for (let x = 0; x <= W; x += 16) {
+                    const y = waveY + Math.sin(x * 0.025 + performance.now() * 0.002 + i) * 5;
+                    if (x === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+            }
+        }
+
+        function drawDock() {
+            ctx.fillStyle = "#6f4a21";
+            ctx.fillRect(W / 2 - 120, H * 0.47, 240, 18);
+            ctx.fillStyle = "#8f6030";
+            for (let i = 0; i < 6; i++) {
+                ctx.fillRect(W / 2 - 116 + i * 40, H * 0.472, 32, 12);
+            }
+        }
+
+        function drawRod() {
+            const t = performance.now() * 0.002;
+            const baseX = W / 2 - 120;
+            const baseY = 80;
+            const tipX = W / 2 + 5 + Math.sin(t) * 4;
+            const tipY = 190 + Math.cos(t * 1.4) * 5;
+
+            const bobberX = W / 2 + Math.sin(game.lineWave * 3) * 6;
+            const bobberY = (game.phase === "idle")
+                ? H * 0.49 - 20 + Math.sin(game.rodBob * 2) * 4
+                : H * 0.69 + Math.sin(game.rodBob * 4) * 5;
+
+            ctx.save();
+            ctx.lineCap = "round";
+
+            ctx.strokeStyle = "#7a5127";
+            ctx.lineWidth = 12;
+            ctx.beginPath();
+            ctx.moveTo(baseX, baseY);
+            ctx.quadraticCurveTo(W / 2 - 30, 110, tipX, tipY);
+            ctx.stroke();
+
+            ctx.strokeStyle = "#c88a3c";
+            ctx.lineWidth = 5;
+            ctx.beginPath();
+            ctx.moveTo(baseX + 5, baseY + 3);
+            ctx.quadraticCurveTo(W / 2 - 25, 112, tipX + 1, tipY + 1);
+            ctx.stroke();
+
+            ctx.strokeStyle = "rgba(255,255,255,0.8)";
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(tipX, tipY);
+            ctx.quadraticCurveTo(W / 2 + 12, 260, bobberX, bobberY - 8);
+            ctx.stroke();
+
+            if (game.phase !== "idle") {
+                ctx.strokeStyle = "rgba(255,255,255,0.5)";
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                ctx.moveTo(bobberX, bobberY);
+                ctx.lineTo(bobberX, bobberY + 28);
+                ctx.stroke();
+
+                ctx.strokeStyle = "#dddddd";
+                ctx.beginPath();
+                ctx.moveTo(bobberX, bobberY + 24);
+                ctx.quadraticCurveTo(bobberX + 8, bobberY + 34, bobberX + 2, bobberY + 40);
+                ctx.stroke();
+            }
+
+            if (game.phase === "waiting" || game.phase === "bite") {
+                ctx.fillStyle = game.phase === "bite" ? "#ff6a6a" : "#ff9b52";
+                ctx.beginPath();
+                ctx.arc(bobberX, bobberY, 10, 0, Math.PI * 2);
+                ctx.fill();
+
+                ctx.fillStyle = "#fff8d6";
+                ctx.beginPath();
+                ctx.arc(bobberX, bobberY - 5, 7, Math.PI, 0);
+                ctx.fill();
+
+                if (game.phase === "bite") {
+                    ctx.strokeStyle = "rgba(255,255,180,0.7)";
+                    ctx.lineWidth = 3;
+                    ctx.beginPath();
+                    ctx.arc(bobberX, bobberY, 16 + Math.sin(performance.now() * 0.02) * 2, 0, Math.PI * 2);
+                    ctx.stroke();
+                }
+            }
+
+            ctx.restore();
+        }
+
+        function drawRipplesAndBubbles() {
+            game.ripples.forEach(r => {
+                ctx.strokeStyle = `rgba(255,255,255,${r.alpha})`;
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.ellipse(r.x, r.y, r.r * 1.4, r.r * 0.55, 0, 0, Math.PI * 2);
+                ctx.stroke();
+            });
+
+            game.bubbles.forEach(b => {
+                ctx.fillStyle = "rgba(255,255,255,0.28)";
+                ctx.beginPath();
+                ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+                ctx.fill();
+            });
+        }
+
+        function drawParticles() {
+            game.particles.forEach(p => {
+                ctx.fillStyle = hexToRgba(p.color, p.alpha);
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+                ctx.fill();
+            });
+        }
+
+        function drawFishIcon(x, y, size, color) {
+            ctx.save();
+            ctx.translate(x, y);
+
+            ctx.fillStyle = color;
+            ctx.beginPath();
+            ctx.ellipse(0, 0, size * 0.8, size * 0.48, 0, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.beginPath();
+            ctx.moveTo(-size * 0.82, 0);
+            ctx.lineTo(-size * 1.25, -size * 0.35);
+            ctx.lineTo(-size * 1.25, size * 0.35);
+            ctx.closePath();
+            ctx.fill();
+
+            ctx.fillStyle = "rgba(255,255,255,0.85)";
+            ctx.beginPath();
+            ctx.arc(size * 0.35, -size * 0.07, size * 0.1, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.restore();
+        }
+
+        function drawMinigame() {
+            const mg = game.minigame;
+            if (!mg || !game.currentFish) return;
+
+            ctx.save();
+
+            ctx.fillStyle = "rgba(0,0,0,0.42)";
+            ctx.fillRect(0, 0, W, H);
+
+            ctx.fillStyle = "rgba(244,231,194,0.96)";
+            roundRect(ctx, W / 2 - 120, 60, 240, 420, 24, true, false);
+
+            ctx.fillStyle = "#b88c4f";
+            roundRect(ctx, W / 2 - 92, mg.barY - 10, 110, mg.barH + 20, 18, true, false);
+
+            ctx.fillStyle = "#9fd7ff";
+            roundRect(ctx, mg.barX, mg.barY, mg.barW, mg.barH, 14, true, false);
+
+            const playerTop = mg.playerY - mg.playerH / 2;
+            ctx.fillStyle = "rgba(83, 221, 68, 0.9)";
+            roundRect(ctx, mg.barX + 8, playerTop, mg.barW - 16, mg.playerH, 12, true, false);
+
+            ctx.strokeStyle = "rgba(255,255,255,0.55)";
+            ctx.lineWidth = 2;
+            roundRect(ctx, mg.barX + 8, playerTop, mg.barW - 16, mg.playerH, 12, false, true);
+
+            drawFishIcon(mg.barX + mg.barW / 2, mg.fishY, 16, game.currentFish.color);
+
+            ctx.fillStyle = "#5fdb47";
+            roundRect(ctx, mg.barX + 92, mg.barY, 20, mg.barH, 10, true, false);
+
+            ctx.fillStyle = "#19331e";
+            const progressHeight = (mg.progress / 100) * mg.barH;
+            roundRect(ctx, mg.barX + 96, mg.barY + (mg.barH - progressHeight), 12, progressHeight, 8, true, false);
+
+            ctx.fillStyle = "#fff";
+            ctx.font = "bold 22px Arial";
+            ctx.textAlign = "center";
+            ctx.fillText(game.currentFish.name, W / 2, 92);
+
+            ctx.font = "16px Arial";
+            ctx.fillStyle = "#3f3120";
+            ctx.fillText("Ține peștele în zona verde", W / 2, 468);
+
+            ctx.restore();
+        }
+
+        function drawFlash() {
+            if (game.flash <= 0) return;
+            ctx.fillStyle = `rgba(255,255,255,${game.flash * 0.25})`;
+            ctx.fillRect(0, 0, W, H);
+        }
+
+        function drawScene() {
+            ctx.clearRect(0, 0, W, H);
+            drawBackground();
+            drawDock();
+            drawRod();
+            drawRipplesAndBubbles();
+            drawParticles();
+            if (game.phase === "minigame") drawMinigame();
+            drawFlash();
+        }
+
+        function hexToRgba(hex, alpha) {
+            const h = hex.replace("#", "");
+            const bigint = parseInt(h, 16);
+            const r = (bigint >> 16) & 255;
+            const g = (bigint >> 8) & 255;
+            const b = bigint & 255;
+            return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+        }
+
+        function roundRect(ctx, x, y, w, h, r, fill, stroke) {
+            if (w < 2 * r) r = w / 2;
+            if (h < 2 * r) r = h / 2;
+            ctx.beginPath();
+            ctx.moveTo(x + r, y);
+            ctx.arcTo(x + w, y, x + w, y + h, r);
+            ctx.arcTo(x + w, y + h, x, y + h, r);
+            ctx.arcTo(x, y + h, x, y, r);
+            ctx.arcTo(x, y, x + w, y, r);
+            ctx.closePath();
+            if (fill) ctx.fill();
+            if (stroke) ctx.stroke();
+        }
+
+        let lastTime = 0;
+        function animate(time = 0) {
+            const dt = Math.min((time - lastTime) / 16.666, 1.8) || 1;
+            lastTime = time;
+
+            updateWorld(dt);
+            drawScene();
+
+            requestAnimationFrame(animate);
+        }
+
+        castBtn.addEventListener("click", startFishing);
+        reelBtn.addEventListener("click", startMinigame);
+
+        collectionBtn.addEventListener("click", () => {
+            collectionPanel.classList.remove("hidden");
+            collectionPanel.classList.add("show");
+        });
+
+        closeCollection.addEventListener("click", () => {
+            collectionPanel.classList.add("hidden");
+            collectionPanel.classList.remove("show");
+        });
+
+        collectionPanel.addEventListener("click", (e) => {
+            if (e.target === collectionPanel) {
+                collectionPanel.classList.add("hidden");
+                collectionPanel.classList.remove("show");
+            }
+        });
+
+        document.addEventListener("keydown", (e) => {
+            if (e.code === "Space") {
+                e.preventDefault();
+                game.inputHold = true;
+            }
+        });
+
+        document.addEventListener("keyup", (e) => {
+            if (e.code === "Space") {
+                game.inputHold = false;
+            }
+        });
+
+        canvas.addEventListener("mousedown", () => {
+            game.inputHold = true;
+        });
+
+        canvas.addEventListener("mouseup", () => {
+            game.inputHold = false;
+        });
+
+        canvas.addEventListener("mouseleave", () => {
+            game.inputHold = false;
+        });
+
+        canvas.addEventListener("touchstart", (e) => {
+            e.preventDefault();
+            game.inputHold = true;
+        }, { passive: false });
+
+        canvas.addEventListener("touchend", () => {
+            game.inputHold = false;
+        });
+
+        setInterval(() => {
+            if (game.phase === "waiting" || game.phase === "bite" || game.phase === "minigame") {
+                addBubble();
+            }
+        }, 420);
+
+        setInterval(() => {
+            if (game.phase === "waiting" || game.phase === "bite") {
+                addRipple(W / 2 + (Math.random() * 22 - 11), H * 0.72 + Math.random() * 8, 8 + Math.random() * 10);
+            }
+        }, 900);
+
+        updateHud();
+        updateCollection();
+        animate();
+    </script>
+</body>
+
+</html>
